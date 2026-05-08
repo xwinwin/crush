@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
@@ -282,6 +283,18 @@ func (w *AppWorkspace) ImportCopilot() (*oauth.Token, bool) {
 
 func (w *AppWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error {
 	return w.store.RefreshOAuthToken(ctx, scope, providerID)
+}
+
+func (w *AppWorkspace) RefreshProviderModels(ctx context.Context, scope config.Scope, providerID string) error {
+	return w.store.RefreshProviderModels(ctx, scope, providerID)
+}
+
+func (w *AppWorkspace) ConfigPath(scope config.Scope) (string, error) {
+	return w.store.ConfigPath(scope)
+}
+
+func (w *AppWorkspace) PersistFetchedModels(providerID string, models []catwalk.Model) error {
+	return w.store.PersistFetchedModels(providerID, models)
 }
 
 // -- Project lifecycle --

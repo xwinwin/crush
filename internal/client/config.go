@@ -131,6 +131,28 @@ func (c *Client) RefreshOAuthToken(ctx context.Context, id string, scope config.
 	return nil
 }
 
+// RefreshProviderModels refreshes the model list for the given provider.
+func (c *Client) RefreshProviderModels(ctx context.Context, id string, scope config.Scope, providerID string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/refresh-models", id), nil, jsonBody(struct {
+		Scope      config.Scope `json:"scope"`
+		ProviderID string       `json:"provider_id"`
+	}{Scope: scope, ProviderID: providerID}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to refresh provider models: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to refresh provider models: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) ConfigPath(id string, scope config.Scope) (string, error) {
+	// ConfigPath is not available through the API — only the local ConfigStore
+	// has this capability. This is used only for local (app) workspace.
+	return "", fmt.Errorf("ConfigPath not available for remote workspaces")
+}
+
 // ProjectNeedsInitialization checks if the project needs
 // initialization.
 func (c *Client) ProjectNeedsInitialization(ctx context.Context, id string) (bool, error) {

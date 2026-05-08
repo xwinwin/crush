@@ -565,7 +565,9 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, errLargeModelProviderNotConfigured
 	}
 
-	largeProvider, err := c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
+	var largeProvider fantasy.Provider
+	var err error
+	largeProvider, err = c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
@@ -575,7 +577,8 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, errSmallModelProviderNotConfigured
 	}
 
-	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
+	var smallProvider fantasy.Provider
+	smallProvider, err = c.buildProvider(smallProviderCfg, smallModelCfg, true)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
@@ -595,11 +598,72 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	}
 
 	if largeCatwalkModel == nil {
-		return Model{}, Model{}, errLargeModelNotFound
+		// For providers with fetch_models enabled, the model might not be
+		// in the cached list yet. Try to fetch models from the API.
+		if largeProviderCfg.FetchModels {
+			slog.Info("Large model not found in provider config, trying to fetch models", "provider", largeModelCfg.Provider)
+			fetched, err := largeProviderCfg.FetchProviderModels(ctx)
+			if err != nil {
+				slog.Warn("Failed to fetch models for provider", "provider", largeModelCfg.Provider, "error", err)
+				// Keep the user's original selection — the models dialog will
+				// show the provider with an empty model list and allow a
+				// manual refresh. Don't fall back to a default model.
+			} else if len(fetched) > 0 {
+				// Update the provider config with fetched models
+				fetchedCfg, _ := c.cfg.Config().Providers.Get(largeModelCfg.Provider)
+				fetchedCfg.Models = fetched
+				c.cfg.Config().Providers.Set(largeModelCfg.Provider, fetchedCfg)
+				// Re-build the provider with the new models
+				largeProviderCfg = fetchedCfg
+				largeProvider, err = c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
+				if err != nil {
+					return Model{}, Model{}, err
+				}
+				// Retry lookup
+				for _, m := range fetched {
+					if m.ID == largeModelCfg.Model {
+						largeCatwalkModel = &m
+						break
+					}
+				}
+			}
+		}
+		if largeCatwalkModel == nil {
+			return Model{}, Model{}, errLargeModelNotFound
+		}
 	}
 
 	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errSmallModelNotFound
+		// For providers with fetch_models enabled, the model might not be
+		// in the cached list yet. Try to fetch models from the API.
+		if smallProviderCfg.FetchModels {
+			slog.Info("Small model not found in provider config, trying to fetch models", "provider", smallModelCfg.Provider)
+			fetched, err := smallProviderCfg.FetchProviderModels(ctx)
+			if err != nil {
+				slog.Warn("Failed to fetch models for provider", "provider", smallModelCfg.Provider, "error", err)
+				// Keep the user's original selection — the models dialog will
+				// show the provider with an empty model list and allow a
+				// manual refresh. Don't fall back to a default model.
+			} else if len(fetched) > 0 {
+				smallProviderCfg, _ := c.cfg.Config().Providers.Get(smallModelCfg.Provider)
+				smallProviderCfg.Models = fetched
+				c.cfg.Config().Providers.Set(smallModelCfg.Provider, smallProviderCfg)
+				// Re-build the provider with the new models
+				smallProvider, err = c.buildProvider(smallProviderCfg, smallModelCfg, true)
+				if err != nil {
+					return Model{}, Model{}, err
+				}
+				for _, m := range fetched {
+					if m.ID == smallModelCfg.Model {
+						smallCatwalkModel = &m
+						break
+					}
+				}
+			}
+		}
+		if smallCatwalkModel == nil {
+			return Model{}, Model{}, errSmallModelNotFound
+		}
 	}
 
 	largeModelID := largeModelCfg.Model

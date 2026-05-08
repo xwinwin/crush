@@ -1420,7 +1420,12 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, agentCfg.Model, currentModel); err != nil {
 				return util.ReportError(err)()
 			}
-			m.com.Workspace.UpdateAgentModel(context.TODO())
+			cmds = append(cmds, func() tea.Msg {
+				if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
+					return util.ReportError(err)
+				}
+				return nil
+			})
 			status := "disabled"
 			if currentModel.Think {
 				status = "enabled"
@@ -1494,10 +1499,17 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
-		cmds = append(cmds, func() tea.Msg {
-			m.com.Workspace.UpdateAgentModel(context.TODO())
-			return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
-		})
+		cmds = append(cmds, tea.Sequence(
+			func() tea.Msg {
+				if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
+					return util.ReportError(err)
+				}
+				return nil
+			},
+			func() tea.Msg {
+				return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
+			},
+		))
 		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:
 		m.dialog.CloseDialog(dialog.PermissionsID)
@@ -1677,15 +1689,21 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		}
 	}
 
-	cmds = append(cmds, func() tea.Msg {
-		if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
-			return util.ReportError(err)
-		}
-
-		modelMsg := fmt.Sprintf("%s model changed to %s", msg.ModelType, msg.Model.Model)
-
-		return util.NewInfoMsg(modelMsg)
-	})
+	// Update the agent model asynchronously so the TUI doesn't freeze
+	// during provider building (which may involve HTTP for fetch_models
+	// providers). The info message is shown immediately.
+	cmds = append(cmds, tea.Sequence(
+		func() tea.Msg {
+			modelMsg := fmt.Sprintf("%s model changed to %s", msg.ModelType, msg.Model.Model)
+			return util.NewInfoMsg(modelMsg)
+		},
+		func() tea.Msg {
+			if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
+				return util.ReportError(err)
+			}
+			return nil
+		},
+	))
 
 	m.dialog.CloseDialog(dialog.APIKeyInputID)
 	m.dialog.CloseDialog(dialog.OAuthID)
@@ -3744,7 +3762,9 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 
 func (m *UI) handleStateChanged() tea.Cmd {
 	return func() tea.Msg {
-		m.com.Workspace.UpdateAgentModel(context.Background())
+		if err := m.com.Workspace.UpdateAgentModel(context.Background()); err != nil {
+			slog.Error("Failed to update agent model", "error", err)
+		}
 		return mcpStateChangedMsg{
 			states: m.com.Workspace.MCPGetStates(),
 		}

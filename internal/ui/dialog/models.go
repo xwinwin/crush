@@ -2,7 +2,9 @@ package dialog
 
 import (
 	"cmp"
+	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"charm.land/bubbles/v2/help"
@@ -13,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/util"
+	"golang.org/x/sync/errgroup"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
@@ -147,6 +150,11 @@ func NewModels(com *common.Common, isOnboarding bool) (*Models, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get providers: %w", err)
 	}
+
+	// Try to auto-fetch models for fetch_models providers that have no
+	// cached models. If fetch fails, the provider will still appear with no
+	// models and can be refreshed manually.
+	m.ensureProviderModels()
 
 	if err := m.setProviderItems(); err != nil {
 		return nil, fmt.Errorf("failed to set provider items: %w", err)
@@ -338,6 +346,52 @@ func (m *Models) isSelectedConfigured() bool {
 	providerID := string(modelItem.prov.ID)
 	_, isConfigured := m.com.Config().Providers.Get(providerID)
 	return isConfigured
+}
+
+// ensureProviderModels fetches the latest model list for all configured
+// providers with fetch_models enabled. It always fetches from the API when
+// the dialog is opened, then updates both memory and disk. If fetch fails,
+// the provider is left with an empty model list and can be refreshed manually.
+// Fetches are done in parallel for all providers.
+func (m *Models) ensureProviderModels() error {
+	var eg errgroup.Group
+	for id, providerConfig := range m.com.Config().Providers.Seq2() {
+		if providerConfig.Disable {
+			continue
+		}
+		if !providerConfig.FetchModels {
+			continue
+		}
+
+		// Always fetch models when the dialog is opened.
+		slog.Info("Fetching models for provider on dialog open", "provider", id, "base_url", providerConfig.BaseURL)
+		providerConfig := providerConfig // capture loop variable
+		id := id
+		eg.Go(func() error {
+			fetchedModels, err := providerConfig.FetchProviderModels(context.Background())
+			if err != nil {
+				slog.Warn("Failed to fetch models for provider on dialog open", "provider", id, "error", err)
+				// Don't fail the dialog — the provider will appear with no models
+				// and the user can try refreshing later.
+				return nil
+			}
+			if len(fetchedModels) == 0 {
+				slog.Warn("No models fetched for provider on dialog open", "provider", id)
+				return nil
+			}
+			providerConfig.Models = fetchedModels
+			m.com.Config().Providers.Set(id, providerConfig)
+
+			// Persist to disk for future startups without re-fetching.
+			// We write the models and fetch_models flag directly to avoid
+			// calling RefreshProviderModels which would re-fetch from the API.
+			if err := m.com.Workspace.PersistFetchedModels(id, fetchedModels); err != nil {
+				slog.Warn("Failed to persist fetched models", "provider", id, "error", err)
+			}
+			return nil
+		})
+	}
+	return eg.Wait()
 }
 
 // setProviderItems sets the provider items in the list.

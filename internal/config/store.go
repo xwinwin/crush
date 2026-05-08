@@ -108,6 +108,11 @@ func (s *ConfigStore) configPath(scope Scope) (string, error) {
 	}
 }
 
+// ConfigPath returns the file path for the given scope.
+func (s *ConfigStore) ConfigPath(scope Scope) (string, error) {
+	return s.configPath(scope)
+}
+
 // HasConfigField checks whether a key exists in the config file for the given
 // scope.
 func (s *ConfigStore) HasConfigField(scope Scope, key string) bool {
@@ -297,6 +302,98 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 	}
 	s.config.Providers.Set(providerID, providerConfig)
 	return nil
+}
+
+// RefreshProviderModels fetches the latest model list from the provider's API,
+// updates the in-memory config, and persists the models to disk. The persisted
+// models will be used on the next startup to avoid re-fetching.
+func (s *ConfigStore) RefreshProviderModels(ctx context.Context, scope Scope, providerID string) error {
+	providerConfig, exists := s.config.Providers.Get(providerID)
+	if !exists {
+		return fmt.Errorf("provider %s not found", providerID)
+	}
+
+	if !providerConfig.FetchModels && len(providerConfig.Models) == 0 {
+		return fmt.Errorf("provider %s does not have fetch_models enabled and has no models", providerID)
+	}
+
+	fetchedModels, err := providerConfig.FetchProviderModels(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to refresh models for provider %s: %w", providerID, err)
+	}
+
+	if len(fetchedModels) == 0 {
+		return fmt.Errorf("no models fetched for provider %s", providerID)
+	}
+
+	// Update in-memory config
+	providerConfig.Models = fetchedModels
+	s.config.Providers.Set(providerID, providerConfig)
+
+	// Persist the models to disk so the next startup can use them without
+	// re-fetching.
+	if err := s.PersistFetchedModels(providerID, fetchedModels); err != nil {
+		slog.Warn("Failed to persist fetched models to disk", "provider", providerID, "error", err)
+	}
+
+	slog.Info("Refreshed models for provider", "provider", providerID, "count", len(fetchedModels))
+
+	return nil
+}
+
+// PersistFetchedModels writes the fetched models to the provider's config
+// on disk, so that future startups can load them without re-fetching.
+// Only persists id and name fields — Options (which may contain owned_by)
+// are not persisted to avoid bloating the config file.
+func (s *ConfigStore) PersistFetchedModels(providerID string, models []catwalk.Model) error {
+	// Find the scope (workspace vs global) where this provider was originally configured.
+	// We check both scopes.
+	for _, scope := range []Scope{ScopeWorkspace, ScopeGlobal} {
+		path, err := s.configPath(scope)
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if !gjson.Get(string(data), fmt.Sprintf("providers.%s", providerID)).Exists() {
+			continue
+		}
+		// This provider exists in this scope's config — persist the models here.
+		// Build a minimal model list with only id and name to avoid
+		// persisting Options.ProviderOptions (which contains owned_by).
+		type modelEntry struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		modelEntries := make([]modelEntry, 0, len(models))
+		for _, m := range models {
+			modelEntries = append(modelEntries, modelEntry{
+				ID:   m.ID,
+				Name: m.Name,
+			})
+		}
+		modelsJSON, err := json.Marshal(modelEntries)
+		if err != nil {
+			return fmt.Errorf("failed to marshal models: %w", err)
+		}
+		newData, err := sjson.SetRaw(string(modelsJSON), fmt.Sprintf("providers.%s.models", providerID), ".")
+		if err != nil {
+			return fmt.Errorf("failed to set models in config: %w", err)
+		}
+		// Also ensure fetch_models is set to true
+		newData, err = sjson.Set(newData, fmt.Sprintf("providers.%s.fetch_models", providerID), true)
+		if err != nil {
+			return fmt.Errorf("failed to set fetch_models in config: %w", err)
+		}
+		if err := os.WriteFile(path, []byte(newData), 0o600); err != nil {
+			return fmt.Errorf("failed to write config file: %w", err)
+		}
+		slog.Info("Persisted fetched models to disk", "provider", providerID, "path", path, "count", len(models))
+		return nil
+	}
+	return fmt.Errorf("could not find config file containing provider %s", providerID)
 }
 
 // RefreshOAuthToken refreshes the OAuth token for the given provider.

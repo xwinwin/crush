@@ -201,6 +201,35 @@ func (c *controllerV1) handlePostWorkspaceConfigRefreshOAuth(w http.ResponseWrit
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceConfigRefreshModels refreshes the model list for a provider.
+//
+//	@Summary		Refresh provider models
+//	@Tags			config
+//	@Accept			json
+//	@Param			id		path	string							true	"Workspace ID"
+//	@Param			request	body	proto.ConfigRefreshOAuthRequest	true	"Refresh models request"
+//	@Success		200
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/config/refresh-models [post]
+func (c *controllerV1) handlePostWorkspaceConfigRefreshModels(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.ConfigRefreshOAuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	if err := c.backend.RefreshProviderModels(r.Context(), id, req.Scope, req.ProviderID); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handleGetWorkspaceProjectNeedsInit reports whether a project needs initialization.
 //
 //	@Summary		Check if project needs initialization

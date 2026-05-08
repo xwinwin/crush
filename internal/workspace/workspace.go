@@ -122,6 +122,9 @@ type Workspace interface {
 	RemoveConfigField(scope config.Scope, key string) error
 	ImportCopilot() (*oauth.Token, bool)
 	RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error
+	RefreshProviderModels(ctx context.Context, scope config.Scope, providerID string) error
+	ConfigPath(scope config.Scope) (string, error)
+	PersistFetchedModels(providerID string, models []catwalk.Model) error
 
 	// Project lifecycle
 	ProjectNeedsInitialization() (bool, error)

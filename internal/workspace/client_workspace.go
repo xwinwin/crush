@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/client"
@@ -456,6 +457,24 @@ func (w *ClientWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Sc
 		w.refreshWorkspace()
 	}
 	return err
+}
+
+func (w *ClientWorkspace) RefreshProviderModels(ctx context.Context, scope config.Scope, providerID string) error {
+	err := w.client.RefreshProviderModels(ctx, w.workspaceID(), scope, providerID)
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
+func (w *ClientWorkspace) ConfigPath(scope config.Scope) (string, error) {
+	return w.client.ConfigPath(w.workspaceID(), scope)
+}
+
+func (w *ClientWorkspace) PersistFetchedModels(providerID string, models []catwalk.Model) error {
+	// PersistFetchedModels is not available through the API — only the local
+	// ConfigStore has this capability. This is used only for local (app) workspace.
+	return fmt.Errorf("PersistFetchedModels not available for remote workspaces")
 }
 
 // -- Project lifecycle --

@@ -3,6 +3,7 @@ package config
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,10 @@ type ProviderConfig struct {
 	OAuthToken *oauth.Token `json:"oauth,omitempty" jsonschema:"description=OAuth2 token for authentication with the provider"`
 	// Marks the provider as disabled.
 	Disable bool `json:"disable,omitempty" jsonschema:"description=Whether this provider is disabled,default=false"`
+	// FetchModels controls whether to automatically fetch the model list
+	// from the provider's API. When true, the models field is ignored and
+	// models are fetched on-demand (e.g., for local providers like Ollama).
+	FetchModels bool `json:"fetch_models,omitempty" jsonschema:"description=Automatically fetch model list from the provider's API,default=false"`
 
 	// Custom system prompt prefix.
 	SystemPromptPrefix string `json:"system_prompt_prefix,omitempty" jsonschema:"description=Custom prefix to add to system prompts for this provider"`
@@ -682,4 +687,125 @@ func ptrValOr[T any](t *T, el T) T {
 		return el
 	}
 	return *t
+}
+
+// openAIModelList represents the response from an OpenAI-compatible /v1/models endpoint.
+type openAIModelList struct {
+	Data []openAIModel `json:"data"`
+}
+
+type openAIModel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// OwnedBy is the model owner (e.g., "llamacpp", "ollama", "openai").
+	OwnedBy string `json:"owned_by"`
+	// Created is the Unix timestamp when the model was created.
+	Created int64 `json:"created"`
+}
+
+// FetchProviderModels fetches the model list from the provider's API endpoint and
+// converts it to catwalk.Model entries. It supports the OpenAI-compatible
+// /v1/models endpoint (used by llama.cpp, Ollama, vLLM, etc.).
+func (c *ProviderConfig) FetchProviderModels(ctx context.Context) ([]catwalk.Model, error) {
+	if c.BaseURL == "" {
+		return nil, fmt.Errorf("base_url is required to fetch models")
+	}
+
+	baseURL, err := c.resolveBaseURL()
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure we hit the models endpoint — OpenAI-compatible APIs serve at /v1/models
+	modelsURL := baseURL
+	if !strings.HasSuffix(baseURL, "/") {
+		modelsURL += "/"
+	}
+	// Avoid double /v1 if baseURL already ends with /v1
+	if strings.HasSuffix(baseURL, "/v1") {
+		modelsURL += "models"
+	} else {
+		modelsURL += "v1/models"
+	}
+
+	apiKey, err := c.resolveAPIKey()
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	for k, v := range c.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch models from %s: %w", modelsURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d fetching models from %s", resp.StatusCode, modelsURL)
+	}
+
+	var modelList openAIModelList
+	if err := json.NewDecoder(resp.Body).Decode(&modelList); err != nil {
+		return nil, fmt.Errorf("failed to decode models response from %s: %w", modelsURL, err)
+	}
+
+	models := make([]catwalk.Model, 0, len(modelList.Data))
+	for _, m := range modelList.Data {
+		// Use the model ID as the name if not set
+		modelName := m.ID
+		if m.Name != "" {
+			modelName = m.Name
+		} else if m.OwnedBy != "" {
+			modelName = fmt.Sprintf("%s (%s)", m.OwnedBy, m.ID)
+		}
+
+		models = append(models, catwalk.Model{
+			ID:      m.ID,
+			Name:    modelName,
+			// owned_by is not part of catwalk.Model; store it in Options if needed
+			Options: catwalk.ModelOptions{
+				ProviderOptions: map[string]any{
+					"owned_by": m.OwnedBy,
+				},
+			},
+		})
+	}
+
+	slog.Info("Fetched models from provider", "provider", c.ID, "count", len(models), "url", modelsURL)
+	return models, nil
+}
+
+// resolveBaseURL returns the resolved base URL for the provider.
+func (c *ProviderConfig) resolveBaseURL() (string, error) {
+	resolver := NewShellVariableResolver(env.New())
+	baseURL, err := resolver.ResolveValue(c.BaseURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve base_url: %w", err)
+	}
+	if baseURL == "" {
+		return "", errors.New("base_url is empty")
+	}
+	return baseURL, nil
+}
+
+// resolveAPIKey returns the resolved API key for the provider.
+func (c *ProviderConfig) resolveAPIKey() (string, error) {
+	resolver := NewShellVariableResolver(env.New())
+	apiKey, err := resolver.ResolveValue(c.APIKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve api_key: %w", err)
+	}
+	return apiKey, nil
 }

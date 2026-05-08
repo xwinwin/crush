@@ -360,10 +360,16 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			c.Providers.Del(id)
 			continue
 		}
-		if len(providerConfig.Models) == 0 {
+		if len(providerConfig.Models) == 0 && !providerConfig.FetchModels {
 			slog.Warn("Skipping custom provider because the provider has no models", "provider", id)
 			c.Providers.Del(id)
 			continue
+		}
+		if providerConfig.FetchModels {
+			slog.Info("Provider has fetch_models enabled, will fetch models on-demand", "provider", id, "base_url", providerConfig.BaseURL)
+			// Don't fetch models on startup — models will be fetched when the
+			// user switches models. Keep the provider in the config even if no
+			// cached models are available; the models dialog will fetch them.
 		}
 		apiKey, err := resolver.ResolveValue(providerConfig.APIKey)
 		if apiKey == "" || err != nil {
@@ -600,10 +606,16 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		}
 		model := c.GetModel(large.Provider, large.Model)
 		if model == nil {
-			large = defaultLarge
-			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
-					return fmt.Errorf("failed to update preferred large model: %w", err)
+			// For providers with fetch_models enabled, the model might not be
+			// in the cached list yet — keep the user's selection as-is and let
+			// the models dialog fetch models later. Only fall back to default
+			// if the provider is NOT a fetch_models provider.
+			if providerCfg, ok := c.Providers.Get(large.Provider); !ok || !providerCfg.FetchModels {
+				large = defaultLarge
+				if persist {
+					if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
+						return fmt.Errorf("failed to update preferred large model: %w", err)
+					}
 				}
 			}
 		} else {
@@ -644,10 +656,12 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 
 		model := c.GetModel(small.Provider, small.Model)
 		if model == nil {
-			small = defaultSmall
-			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
-					return fmt.Errorf("failed to update preferred small model: %w", err)
+			if providerCfg, ok := c.Providers.Get(small.Provider); !ok || !providerCfg.FetchModels {
+				small = defaultSmall
+				if persist {
+					if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
+						return fmt.Errorf("failed to update preferred small model: %w", err)
+					}
 				}
 			}
 		} else {

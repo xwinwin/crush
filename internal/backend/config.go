@@ -88,6 +88,23 @@ func (b *Backend) RefreshOAuthToken(ctx context.Context, workspaceID string, sco
 	return ws.Cfg.RefreshOAuthToken(ctx, scope, providerID)
 }
 
+// RefreshProviderModels refreshes the model list for the given provider.
+func (b *Backend) RefreshProviderModels(ctx context.Context, workspaceID string, scope config.Scope, providerID string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	return ws.Cfg.RefreshProviderModels(ctx, scope, providerID)
+}
+
+func (b *Backend) ConfigPath(workspaceID string, scope config.Scope) (string, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return ws.Cfg.ConfigPath(scope)
+}
+
 // ProjectNeedsInitialization checks whether the project in this
 // workspace needs initialization.
 func (b *Backend) ProjectNeedsInitialization(workspaceID string) (bool, error) {
