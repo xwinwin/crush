@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -966,7 +967,6 @@ func (c *ProviderConfig) FetchProviderModels(ctx context.Context) ([]catwalk.Mod
 		})
 	}
 
-	slog.Info("Fetched models from provider", "provider", c.ID, "count", len(models), "url", modelsURL)
 	return models, nil
 }
 
