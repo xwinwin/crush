@@ -245,6 +245,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	defer cancel()
 	defer a.activeRequests.Del(call.SessionID)
+	// Drain any debounced message updates before returning. message.Service
+	// already flushes synchronously on terminal updates, but a defer here
+	// guarantees the contract at every Run exit (success, error, panic
+	// recovery upstream) without callers needing to know.
+	defer func() {
+		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
+			slog.Error("Failed to flush pending message updates after run", "error", flushErr)
+		}
+	}()
 
 	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
 
@@ -581,16 +590,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, err
 	}
 
-	// Send notification that agent has finished its turn (skip for
-	// nested/non-interactive sessions).
-	if !call.NonInteractive && a.notify != nil {
-		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			SessionID:    call.SessionID,
-			SessionTitle: currentSession.Title,
-			Type:         notify.TypeAgentFinished,
-		})
-	}
-
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
 		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions); summarizeErr != nil {
@@ -608,9 +607,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 
-	// Release active request before processing queued messages.
+	// Release active request before publishing the notification.
+	// TUI handlers poll IsSessionBusy() and only re-evaluate when a
+	// tea.Msg arrives, so the cleanup must precede the notify or
+	// subscribers see stale busy state at the moment of receipt.
 	a.activeRequests.Del(call.SessionID)
 	cancel()
+
+	// Send notification that agent has finished its turn (skip for
+	// nested/non-interactive sessions).
+	if !call.NonInteractive && a.notify != nil {
+		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			SessionID:    call.SessionID,
+			SessionTitle: currentSession.Title,
+			Type:         notify.TypeAgentFinished,
+		})
+	}
 
 	queuedMessages, ok := a.messageQueue.Get(call.SessionID)
 	if !ok || len(queuedMessages) == 0 {
@@ -650,6 +662,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	a.activeRequests.Set(sessionID, cancel)
 	defer a.activeRequests.Del(sessionID)
 	defer cancel()
+	defer func() {
+		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
+			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
+		}
+	}()
 
 	agent := fantasy.NewAgent(largeModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),

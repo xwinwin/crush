@@ -343,6 +343,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		notifyWindowFocused: true,
 		initialSessionID:    initialSessionID,
 		continueLastSession: continueLast,
+		skillStates:         skills.GetLatestStates(),
 	}
 
 	status := NewStatus(com, ui)
@@ -1633,7 +1634,8 @@ func (m *UI) fetchHyperCredits() tea.Cmd {
 func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 	var cmds []tea.Cmd
 
-	if m.isAgentBusy() {
+	// we ignore dialogs with the oauth id as they need to be able to be dismissed
+	if m.isAgentBusy() && !m.dialog.ContainsDialog(dialog.OAuthID) {
 		return util.ReportWarn("Agent is busy, please wait...")
 	}
 
@@ -3479,6 +3481,9 @@ func (m *UI) newSession() tea.Cmd {
 
 // handlePasteMsg handles a paste message.
 func (m *UI) handlePasteMsg(msg tea.PasteMsg) tea.Cmd {
+	// Normalize \r\n before the textarea sanitizer sees it.
+	msg.Content = strings.ReplaceAll(msg.Content, "\r\n", "\n")
+
 	if m.dialog.HasDialogs() {
 		return m.handleDialogMsg(msg)
 	}
