@@ -111,7 +111,7 @@ func formatTokensAndCost(t *styles.Styles, tokens, contextWindow int64, cost flo
 		formattedTokens = strings.Replace(formattedTokens, ".0M", "M", 1)
 	}
 
-	var percentage float64 = 0.0f
+	var percentage float64
 	if contextWindow > 0 {
 		percentage = (float64(tokens) / float64(contextWindow)) * 100
 	}
