@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
+	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -210,4 +212,86 @@ func TestNewClientWorkspace_SeedsSkillsCache(t *testing.T) {
 	got := skills.GetLatestStates()
 	require.Len(t, got, 1)
 	require.Equal(t, "seeded", got[0].Name)
+}
+
+// TestTranslateEvent_UpdateAvailable verifies that an incoming
+// proto.UpdateAvailable event is converted back into the
+// app.UpdateAvailableMsg that the TUI expects, so client/server mode
+// shows the same update notification as local mode.
+func TestTranslateEvent_UpdateAvailable(t *testing.T) {
+	t.Parallel()
+
+	w := NewClientWorkspace(nil, proto.Workspace{})
+	ev := pubsub.Event[proto.UpdateAvailable]{
+		Type: pubsub.UpdatedEvent,
+		Payload: proto.UpdateAvailable{
+			CurrentVersion: "1.0.0",
+			LatestVersion:  "1.1.0",
+			IsDevelopment:  true,
+		},
+	}
+
+	out := w.translateEvent(ev)
+	got, ok := out.(app.UpdateAvailableMsg)
+	require.True(t, ok, "expected app.UpdateAvailableMsg, got %T", out)
+	require.Equal(t, "1.0.0", got.CurrentVersion)
+	require.Equal(t, "1.1.0", got.LatestVersion)
+	require.True(t, got.IsDevelopment)
+}
+
+func TestClientWorkspaceListMCPPrompts(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/workspaces/ws-1/mcp/prompts", r.URL.Path)
+		require.NoError(t, json.NewEncoder(w).Encode([]proto.MCPPrompt{
+			{
+				ID:       "server:review",
+				PromptID: "review",
+				ClientID: "server",
+				Arguments: []proto.MCPPromptArgument{
+					{ID: "focus", Title: "Focus", Required: true},
+				},
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	c, err := client.NewClient(t.TempDir(), "tcp", u.Host)
+	require.NoError(t, err)
+	workspace := NewClientWorkspace(c, proto.Workspace{ID: "ws-1"})
+
+	got, err := workspace.ListMCPPrompts(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []commands.MCPPrompt{
+		{
+			ID:       "server:review",
+			PromptID: "review",
+			ClientID: "server",
+			Arguments: []commands.Argument{
+				{ID: "focus", Title: "Focus", Required: true},
+			},
+		},
+	}, got)
+}
+
+func TestClientWorkspaceListMCPPromptsServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	c, err := client.NewClient(t.TempDir(), "tcp", u.Host)
+	require.NoError(t, err)
+	workspace := NewClientWorkspace(c, proto.Workspace{ID: "ws-1"})
+
+	_, err = workspace.ListMCPPrompts(t.Context())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "status code 500")
 }

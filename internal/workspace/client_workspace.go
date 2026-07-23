@@ -13,8 +13,11 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
+	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/herdr"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -23,6 +26,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
@@ -38,6 +42,10 @@ type ClientWorkspace struct {
 	mu     sync.RWMutex
 	ws     proto.Workspace
 	skills *skills.Manager
+
+	// herdrClient reports agent state to herdr when running inside
+	// a herdr-managed pane. Nil when not in a herdr environment.
+	herdrClient *herdr.Client
 }
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
@@ -55,9 +63,10 @@ func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	states := protoToSkillStates(ws.Skills)
 	mgr := skills.NewManager(nil, nil, states, skills.WithGlobalMirror())
 	return &ClientWorkspace{
-		client: c,
-		ws:     ws,
-		skills: mgr,
+		client:      c,
+		ws:          ws,
+		skills:      mgr,
+		herdrClient: herdr.Init(),
 	}
 }
 
@@ -148,6 +157,7 @@ func (w *ClientWorkspace) ParseAgentToolSessionID(sessionID string) (string, str
 // are propagated to the caller; the TUI logs and ignores them since
 // the presence record is a hint, not correctness-critical state.
 func (w *ClientWorkspace) SetCurrentSession(ctx context.Context, sessionID string) error {
+	w.herdrClient.SetSessionID(sessionID)
 	return w.client.SetCurrentSession(ctx, w.workspaceID(), sessionID)
 }
 
@@ -259,7 +269,11 @@ func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 }
 
 func (w *ClientWorkspace) InitCoderAgent(ctx context.Context) error {
-	return w.client.InitiateAgentProcessing(ctx, w.workspaceID())
+	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), true)
+}
+
+func (w *ClientWorkspace) InitCoderAgentNonInteractive(ctx context.Context) error {
+	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), false)
 }
 
 func (w *ClientWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
@@ -333,6 +347,40 @@ func (w *ClientWorkspace) PermissionSkipRequests() bool {
 
 func (w *ClientWorkspace) PermissionSetSkipRequests(skip bool) {
 	_ = w.client.SetPermissionsSkipRequests(context.Background(), w.workspaceID(), skip)
+}
+
+// -- Questions --
+
+// QuestionAnswer submits answers for a question via the client SDK.
+func (w *ClientWorkspace) QuestionAnswer(responses []question.Answer) bool {
+	protoResp := proto.QuestionAnswer{
+		Responses: make([]proto.QuestionResponse, len(responses)),
+	}
+	for i, r := range responses {
+		protoResp.Responses[i] = proto.QuestionResponse{
+			QuestionID:  r.QuestionID,
+			SelectedIDs: r.SelectedIDs,
+			FillInText:  r.FillInText,
+			Yes:         r.Yes,
+			Notes:       r.Notes,
+		}
+	}
+	resolved, err := w.client.AnswerQuestionBatch(context.Background(), w.workspaceID(), protoResp)
+	if err != nil {
+		slog.Error("Failed to answer question", "error", err)
+		return false
+	}
+	return resolved
+}
+
+// QuestionCancel cancels the pending question via the client SDK.
+func (w *ClientWorkspace) QuestionCancel() bool {
+	cancelled, err := w.client.CancelQuestionBatch(context.Background(), w.workspaceID())
+	if err != nil {
+		slog.Error("Failed to cancel question", "error", err)
+		return false
+	}
+	return cancelled
 }
 
 // -- FileTracker --
@@ -606,6 +654,34 @@ func (w *ClientWorkspace) ReadMCPResource(ctx context.Context, name, uri string)
 	return result, nil
 }
 
+func (w *ClientWorkspace) ListMCPPrompts(ctx context.Context) ([]commands.MCPPrompt, error) {
+	prompts, err := w.client.ListMCPPrompts(ctx, w.workspaceID())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]commands.MCPPrompt, len(prompts))
+	for i, prompt := range prompts {
+		arguments := make([]commands.Argument, len(prompt.Arguments))
+		for j, argument := range prompt.Arguments {
+			arguments[j] = commands.Argument{
+				ID:          argument.ID,
+				Title:       argument.Title,
+				Description: argument.Description,
+				Required:    argument.Required,
+			}
+		}
+		result[i] = commands.MCPPrompt{
+			ID:          prompt.ID,
+			Title:       prompt.Title,
+			Description: prompt.Description,
+			PromptID:    prompt.PromptID,
+			ClientID:    prompt.ClientID,
+			Arguments:   arguments,
+		}
+	}
+	return result, nil
+}
+
 func (w *ClientWorkspace) GetMCPPrompt(clientID, promptID string, args map[string]string) (string, error) {
 	return w.client.GetMCPPrompt(context.Background(), w.workspaceID(), clientID, promptID, args)
 }
@@ -641,6 +717,11 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 // are translated into domain types and forwarded to send.
 func (w *ClientWorkspace) consumeEvents(evc <-chan any, send func(tea.Msg)) {
 	for ev := range evc {
+		// Forward events to herdr if running inside a herdr pane.
+		if hev := herdr.Translate(ev); hev != nil {
+			w.herdrClient.HandleEvent(hev)
+		}
+
 		if _, ok := ev.(pubsub.Event[proto.ConfigChanged]); ok {
 			w.refreshWorkspace()
 			continue
@@ -653,6 +734,7 @@ func (w *ClientWorkspace) consumeEvents(evc <-chan any, send func(tea.Msg)) {
 }
 
 func (w *ClientWorkspace) Shutdown() {
+	w.herdrClient.Close()
 	_ = w.client.DeleteWorkspace(context.Background(), w.workspaceID())
 }
 
@@ -711,6 +793,25 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Denied:     e.Payload.Denied,
 			},
 		}
+	case pubsub.Event[proto.QuestionRequest]:
+		return pubsub.Event[question.Request]{
+			Type: e.Type,
+			Payload: question.Request{
+				ID:                 e.Payload.ID,
+				SessionID:          e.Payload.SessionID,
+				ToolCallID:         e.Payload.ToolCallID,
+				Questions:          protoQuestionsToDomain(e.Payload.Questions),
+				ConfirmTitle:       e.Payload.ConfirmTitle,
+				ConfirmDescription: e.Payload.ConfirmDescription,
+			},
+		}
+	case pubsub.Event[proto.QuestionNotification]:
+		return pubsub.Event[question.Notification]{
+			Type: e.Type,
+			Payload: question.Notification{
+				BatchID: e.Payload.BatchID,
+			},
+		}
 	case pubsub.Event[proto.Message]:
 		return pubsub.Event[message.Message]{
 			Type:    e.Type,
@@ -766,6 +867,12 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 		return pubsub.Event[skills.Event]{
 			Type:    e.Type,
 			Payload: skills.Event{States: states},
+		}
+	case pubsub.Event[proto.UpdateAvailable]:
+		return app.UpdateAvailableMsg{
+			CurrentVersion: e.Payload.CurrentVersion,
+			LatestVersion:  e.Payload.LatestVersion,
+			IsDevelopment:  e.Payload.IsDevelopment,
 		}
 	default:
 		slog.Warn("Unknown event type in translateEvent", "type", fmt.Sprintf("%T", ev))
@@ -964,6 +1071,32 @@ func todosToProto(todos []session.Todo) []proto.Todo {
 			Content:    t.Content,
 			Status:     string(t.Status),
 			ActiveForm: t.ActiveForm,
+		}
+	}
+	return out
+}
+
+func protoQuestionsToDomain(qs []proto.QuestionItem) []question.Question {
+	if len(qs) == 0 {
+		return nil
+	}
+	out := make([]question.Question, len(qs))
+	for i, q := range qs {
+		choices := make([]question.Choice, len(q.Choices))
+		for j, c := range q.Choices {
+			choices[j] = question.Choice{
+				ID:          c.ID,
+				Label:       c.Label,
+				Description: c.Description,
+			}
+		}
+		out[i] = question.Question{
+			ID:          q.ID,
+			Type:        question.Type(q.Type),
+			Label:       q.Label,
+			Text:        q.Question,
+			Description: q.Description,
+			Choices:     choices,
 		}
 	}
 	return out
